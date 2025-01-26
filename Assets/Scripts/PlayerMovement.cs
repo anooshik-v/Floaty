@@ -1,46 +1,77 @@
+using System;
 using UnityEngine;
 
 public class PlayerMovement : MonoBehaviour
-{ [Header("Bubble Growth Settings")]
-    public float growthRate = 1f;       // How quickly the bubble grows
+{
+    [Header("Bubble Growth Settings")]
+    [SerializeField] float growthRate = 1f;       // How quickly the bubble grows
     public float maxSize = 2f;         // Maximum size of the bubble
-    public float minSize = 0.5f;       // Minimum size (bubble shrinks back when idle)
+    public float minSize = 0.2f;       // Minimum size (bubble shrinks back when idle)
     public float shrinkRate = 0.5f;    // Base shrink rate
     public float shrinkMultiplier = 1.5f; // Multiplier for faster shrinking when bubble is larger
+    public AudioClip growSound;         // Sound effect for popping
 
     [Header("Physics Settings")]
     public float liftForce = 5f;       // Upward force applied to the bubble
     public float gravityScale = 1f;    // Custom gravity to control descent
 
     [Header("Pop Settings")]
-    public GameObject popEffect;       // Particle effect for when the bubble pops
     public AudioClip popSound;         // Sound effect for popping
     public AudioSource audioSource;    // AudioSource for playing sounds
 
     [Header("Particle Effects")]
     public ParticleSystem growEffect;  // Particle effect when bubble grows
+    public ParticleSystem popEffect;       // Particle effect for when the bubble pops
 
     private Rigidbody2D rb;
     private Vector3 originalScale;
     private bool isGrowing;
-
+    public float upperBoundary = 5f; // The highest point the player can reach
+    public float lowerBoundary = -5f; // The lowest point the player can go
+    public Vector3 respawnPosition = new Vector3(0, 0, 0); // Original spawn position
+    private HealthManager healthManager;
+    [Header("Immunity Settings")]
+    public float immunityDuration = 2f;
+    private bool isImmune = false;
+    [Header("Visual Settings")]
+    public Color immuneColor = Color.yellow; // Color during immunity
+    public Color normalColor = Color.white; // Normal bubble color
+    private SpriteRenderer spriteRenderer;
+    private DifficultyManager difficultyManager;
     void Start()
     {
         rb = GetComponent<Rigidbody2D>();
+        healthManager = FindFirstObjectByType<HealthManager>();  // Get reference to the HealthManager
+
         originalScale = transform.localScale;
 
-        rb.gravityScale = gravityScale;
-        rb.linearDamping = 0.5f; 
+        // Adjust gravity for smooth descent
+        rb.gravityScale = 0;
+        rb.linearDamping = 0.5f;
+        respawnPosition = transform.position;
+        audioSource = GameObject.Find("SFXSource").GetComponent<AudioSource>();
+        difficultyManager = FindFirstObjectByType<DifficultyManager>();
+        spriteRenderer = transform.GetChild(0).GetComponent<SpriteRenderer>();
+
     }
+
 
     void Update()
     {
         HandleInput();
+        // Check if the player is outside the boundaries
+        if (transform.position.y > upperBoundary || transform.position.y < lowerBoundary)
+        {
+            if (difficultyManager.isPlaying)
+                PopBubble();
+        }
+
     }
 
     void FixedUpdate()
     {
-        ApplyPhysics();
+        if (difficultyManager.isPlaying)
+            ApplyPhysics();
     }
 
     private void HandleInput()
@@ -50,11 +81,23 @@ public class PlayerMovement : MonoBehaviour
         {
             isGrowing = true;
             GrowBubble();
+
+            // Check if the bubble size is too large
+            if (transform.localScale.x >= maxSize || transform.localScale.y >= maxSize)
+            {
+                PopBubble();
+            }
         }
         else
         {
             isGrowing = false;
             ShrinkBubble();
+
+            // Check if the bubble size is too small
+            if (transform.localScale.x <= minSize || transform.localScale.y <= minSize)
+            {
+                PopBubble();
+            }
         }
     }
 
@@ -70,14 +113,10 @@ public class PlayerMovement : MonoBehaviour
             {
                 growEffect.Play();
             }
-        }
-        else
-        {
-            // Pop the bubble if it exceeds max size
-            PopBubble();
+
+
         }
     }
-
     private void ShrinkBubble()
     {
         // Gradually shrink the bubble back to its original size
@@ -91,11 +130,6 @@ public class PlayerMovement : MonoBehaviour
 
         transform.localScale -= Vector3.one * currentShrinkRate * Time.deltaTime;
 
-        // Prevent shrinking below original size
-        if (transform.localScale.x < originalScale.x)
-        {
-            transform.localScale = originalScale;
-        }
 
         // Stop the grow effect
         if (growEffect.isPlaying)
@@ -106,22 +140,26 @@ public class PlayerMovement : MonoBehaviour
 
     private void ApplyPhysics()
     {
- 
-    if (isGrowing)
-    {
-        // Apply a continuous upward force while growing
-        rb.linearVelocity = new Vector2(rb.linearVelocity.x, liftForce);
+        rb.gravityScale = gravityScale;
+        
+        if (isGrowing)
+        {
+            // Apply a continuous upward force while growing
+            rb.linearVelocity = new Vector2(rb.linearVelocity.x, liftForce);
+        }
+        else
+        {
+            // Allow natural gravity to take over when not growing
+            rb.linearVelocity = new Vector2(rb.linearVelocity.x, rb.linearVelocity.y);
+        }
     }
-    else
-    {
-        // Allow natural gravity to take over when not growing
-        rb.linearVelocity = new Vector2(rb.linearVelocity.x, rb.linearVelocity.y);
-    
-    }
-    }
+
 
     private void PopBubble()
     {
+
+        TakeDamage();
+
         // Play pop particle effect
         if (popEffect != null)
         {
@@ -131,15 +169,83 @@ public class PlayerMovement : MonoBehaviour
         // Play pop sound
         if (popSound != null && audioSource != null)
         {
+            var tempVolume = audioSource.volume;
+            audioSource.volume = 1;
             audioSource.PlayOneShot(popSound);
+            audioSource.volume = tempVolume;
         }
 
         // Destroy the bubble
         Debug.Log("Bubble Popped!");
-        Destroy(gameObject);
+        ResetBubble();
 
-        // Trigger Game Over or Restart
-        // (Add your own GameManager logic here if needed)
+
+    }
+
+    private void TakeDamage()
+    {
+        if (difficultyManager.isPlaying)
+            healthManager.ReduceHealth();
+
+        StartCoroutine(StartImmunity());
+
+
+    }
+    private System.Collections.IEnumerator StartImmunity()
+    {
+        isImmune = true;
+
+        // Change visuals for immunity
+        float elapsedTime = 0f;
+        bool toggle = false;
+
+        while (elapsedTime < immunityDuration)
+        {
+            toggle = !toggle;
+            spriteRenderer.color = toggle ? immuneColor : normalColor; // Flashing effect
+
+            elapsedTime += 0.2f; // Time between flashes
+            yield return new WaitForSeconds(0.2f);
+        }
+
+        // End immunity
+        isImmune = false;
+        spriteRenderer.color = normalColor; // Reset to normal color
+    }
+
+
+    private void ResetBubble()
+    {
+        // Reset the bubble to its initial state (or respawn logic)
+        transform.localScale = Vector3.one; // Reset to original size
+        transform.position = respawnPosition; // Reset to initial position (if needed)
+       
+    }
+
+
+    void OnTriggerEnter2D(Collider2D collider)
+    {
+        Debug.Log("Player has collided with the enemy!");
+
+        var enemy = collider.gameObject.GetComponent<Enemy>();
+        // Check if the collision is with an enemy
+        if (enemy != null)
+        {
+            enemy.DestroyEnemy();
+            Debug.Log("Player has collided with the enemy!");
+
+            TakeDamage();
+            transform.localScale = Vector3.one;
+        }
+    }
+
+
+    public void EndTutorial()
+    {
+        Start();
+        difficultyManager.isPlaying = true;
+        rb.gravityScale = gravityScale;
+
+
     }
 }
-
